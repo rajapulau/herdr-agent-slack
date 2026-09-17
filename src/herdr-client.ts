@@ -1,0 +1,346 @@
+import { spawnSync, spawn, type ChildProcess } from "./child-process.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { PaneInfo } from "./types.js";
+import type { AgentSessionRef } from "./agent-sessions.js";
+
+export type { AgentSessionRef };
+
+const DEFAULT_HERDR_BIN = "herdr";
+const COMMON_PATHS = [
+  "/usr/local/bin/herdr",
+  "/usr/bin/herdr",
+  join(homedir(), ".local/bin/herdr"),
+  join(homedir(), ".cargo/bin/herdr"),
+];
+let cachedBin: string | undefined;
+
+/**
+ * Resolve the herdr binary path. Tries in order:
+ *   1. HERDR_BIN_PATH env var (explicit override)
+ *   2. `which herdr` lookup
+ *   3. Common install paths (/usr/local/bin, ~/.local/bin, ~/.cargo/bin)
+ *   4. Falls back to "herdr" (resolved by spawnSync via PATH)
+ *
+ * Result is cached after the first successful resolution.
+ */
+export function herdrBin(): string {
+  if (cachedBin) return cachedBin;
+  // 1. Explicit override
+  if (process.env.HERDR_BIN_PATH && existsSync(process.env.HERDR_BIN_PATH)) {
+    cachedBin = process.env.HERDR_BIN_PATH;
+    return cachedBin;
+  }
+  // 2. which herdr
+  try {
+    const which = spawnSync("which", ["herdr"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    if (which.status === 0 && which.stdout.trim()) {
+      cachedBin = which.stdout.trim();
+      return cachedBin;
+    }
+  } catch {
+    // which not available
+  }
+  // 3. Common paths
+  for (const p of COMMON_PATHS) {
+    if (existsSync(p)) {
+      cachedBin = p;
+      return cachedBin;
+    }
+  }
+  // 4. Fall back to bare name (PATH lookup)
+  cachedBin = DEFAULT_HERDR_BIN;
+  return cachedBin;
+}
+
+/** Reset the cached herdr binary path (for testing). */
+export function resetHerdrBinCache(): void {
+  cachedBin = undefined;
+}
+
+function describeError(args: string[]): string {
+  return `herdr ${args.join(" ")}`;
+}
+
+function execHerdrJson(args: string[]): string {
+  const bin = herdrBin();
+  const result = spawnSync(bin, args, {
+    encoding: "utf8",
+    timeout: 30_000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code;
+    throw new Error(
+      `${describeError(args)} failed: ${result.error.message}` +
+        (code ? ` (errno ${code}; binary: ${bin})` : ` (binary: ${bin})`)
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `${describeError(args)} exited ${result.status}: ${result.stderr.trim() || "(no stderr)"}`
+    );
+  }
+  return result.stdout.trim();
+}
+
+function execHerdr(args: string[]): void {
+  const bin = herdrBin();
+  const result = spawnSync(bin, args, {
+    encoding: "utf8",
+    timeout: 30_000,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code;
+    throw new Error(
+      `${describeError(args)} failed: ${result.error.message}` +
+        (code ? ` (errno ${code}; binary: ${bin})` : ` (binary: ${bin})`)
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `${describeError(args)} exited ${result.status}: ${result.stderr.trim() || "(no stderr)"}`
+    );
+  }
+}
+
+export function parseAgentList(raw: string, tabLabels?: Map<string, string>): PaneInfo[] {
+  try {
+    const parsed = JSON.parse(raw);
+    const agents: any[] = parsed?.result?.agents ?? [];
+    return agents.map((a: any) => {
+      const tabId = String(a.tab_id);
+      // Prefer tab label from herdr tab list, fall back to cwd dirname
+      const label = tabLabels?.get(tabId) ?? a.foreground_cwd?.split("/").pop() ?? "?";
+      return {
+        pane_id: String(a.pane_id),
+        label,
+        agent: a.agent ?? "?",
+        tab_id: tabId,
+        workspace_id: String(a.workspace_id),
+        status: String(a.agent_status || "unknown") as PaneInfo["status"],
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function getAgents(): PaneInfo[] {
+  // Fetch tab labels first, preserving order (some agents on same host share a tab)
+  let tabLabels = new Map<string, string>();
+  const tabOrder: string[] = [];
+  try {
+    const tabRaw = execHerdrJson(["tab", "list"]);
+    const tabs = JSON.parse(tabRaw);
+    const tabItems: any[] = tabs?.result?.tabs ?? [];
+    for (const t of tabItems) {
+      if (t.tab_id && t.label) {
+        tabLabels.set(String(t.tab_id), String(t.label));
+        tabOrder.push(String(t.tab_id));
+      }
+    }
+  } catch {
+    // Tab list failed — fall back to cwd dirnames
+  }
+  const raw = execHerdrJson(["agent", "list"]);
+  const agents = parseAgentList(raw, tabLabels);
+  // Sort by tab order from herdr
+  const orderMap = new Map(tabOrder.map((id, i) => [id, i]));
+  agents.sort((a, b) => {
+    const ai = orderMap.get(a.tab_id) ?? 9999;
+    const bi = orderMap.get(b.tab_id) ?? 9999;
+    return ai - bi;
+  });
+  return agents;
+}
+
+export function buildSendTextArgs(paneId: string, text: string): string[] {
+  return ["pane", "run", paneId, text];
+}
+
+export function sendText(paneId: string, text: string): void {
+  execHerdr(buildSendTextArgs(paneId, text));
+}
+
+// `herdr pane send-keys` accepts named keys (Escape, Enter, Up, Down, etc.)
+// instead of raw bytes. Raw ESC sent via `pane run` is interpreted as the
+// start of an ANSI CSI sequence (ESC + control char) and silently swallowed
+// by the agent TUI; send-keys routes the named key through the terminal
+// input pipeline and triggers the agent's real ESC handler.
+export function buildSendKeysArgs(paneId: string, key: string, ...moreKeys: string[]): string[] {
+  return ["pane", "send-keys", paneId, key, ...moreKeys];
+}
+
+export function sendKeys(paneId: string, key: string, ...moreKeys: string[]): void {
+  execHerdr(buildSendKeysArgs(paneId, key, ...moreKeys));
+}
+
+export function sendEscape(paneId: string): void {
+  sendKeys(paneId, "Escape");
+}
+
+export function buildWaitArgs(paneId: string, timeoutS: number): string[] {
+  return ["agent", "wait", paneId, "--status", "idle", "--timeout", String(timeoutS * 1000)];
+}
+
+export function waitIdle(
+  paneId: string,
+  timeoutS: number
+): { status: "idle" | "blocked" | "timeout" } {
+  try {
+    execHerdr(buildWaitArgs(paneId, timeoutS));
+    return { status: "idle" };
+  } catch (err: any) {
+    const msg = String(err?.stderr ?? err?.message ?? "");
+    if (msg.includes("timeout")) return { status: "timeout" };
+    if (msg.includes("blocked")) return { status: "blocked" };
+    throw err;
+  }
+}
+
+export function readPane(paneId: string, lines: number): string {
+  return execHerdrJson([
+    "pane", "read", paneId, "--source", "recent",
+    "--lines", String(lines), "--format", "text",
+  ]);
+}
+
+export interface AgentInfo {
+  agent: string;
+  agent_status: string;
+  pane_id: string;
+  tab_id: string;
+  workspace_id: string;
+  agent_session?: AgentSessionRef;
+  /** The pane's working directory. Roots `/file` path resolution. */
+  cwd?: string;
+}
+
+/**
+ * Fetch info about an agent target (pane id, tab id, or label).
+ * Returns the parsed agent_info object or null if not found / not an agent.
+ */
+export function getAgentInfo(target: string): AgentInfo | null {
+  let raw: string;
+  try {
+    raw = execHerdrJson(["agent", "get", target]);
+  } catch {
+    return null;
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const a = parsed?.result?.agent;
+  if (!a) return null;
+  let session: AgentSessionRef | undefined;
+  const s = a.agent_session;
+  if (s && s.kind === "path" && typeof s.value === "string") {
+    session = { kind: "path", path: s.value };
+  } else if (s && s.kind === "id" && typeof s.value === "string") {
+    session = { kind: "id", id: s.value };
+  }
+  return {
+    agent: a.agent ?? "?",
+    agent_status: a.agent_status ?? "unknown",
+    pane_id: String(a.pane_id ?? target),
+    tab_id: String(a.tab_id ?? ""),
+    workspace_id: String(a.workspace_id ?? ""),
+    agent_session: session,
+    cwd: typeof a.foreground_cwd === "string" ? a.foreground_cwd : undefined,
+  };
+}
+
+export function spawnDaemon(args: string[], herdrBinPath?: string): ChildProcess {
+  const bin = herdrBinPath || herdrBin();
+  const child = spawn(bin, args, {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  return child;
+}
+
+// --- Creating panes -----------------------------------------------------------
+
+/**
+ * Run herdr and return its stdout, without blocking the daemon. Starting an
+ * agent waits for the agent to come up — the better part of a minute for
+ * some — and a Slack daemon that stops answering events for that long is a
+ * daemon that looks dead.
+ */
+function execHerdrAsync(args: string[], timeoutMs: number): Promise<string> {
+  const bin = herdrBin();
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${describeError(args)} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    child.on("error", (err) => { clearTimeout(timer); reject(new Error(`${describeError(args)} failed: ${err.message}`)); });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      if (status !== 0) reject(new Error(`${describeError(args)} exited ${status}: ${stderr.trim() || "(no stderr)"}`));
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+/** A tab opened for an agent: the pane it starts with is where the agent goes. */
+export interface CreatedTab {
+  tab_id: string;
+  pane_id: string;
+  workspace_id: string;
+}
+
+/**
+ * Open a tab at `cwd`, unfocused: the person at the terminal did not ask for
+ * it and should not lose their place. `workspaceId` keeps it next to the
+ * pane whose work it is for.
+ */
+export async function createTab(opts: { cwd: string; label: string; workspaceId?: string }): Promise<CreatedTab> {
+  const args = ["tab", "create", "--cwd", opts.cwd, "--label", opts.label, "--no-focus"];
+  if (opts.workspaceId) args.push("--workspace", opts.workspaceId);
+  const raw = await execHerdrAsync(args, 30_000);
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`herdr tab create returned something other than JSON: ${raw.slice(0, 200)}`);
+  }
+  const pane = parsed?.result?.root_pane;
+  const tab = parsed?.result?.tab;
+  if (!pane?.pane_id || !tab?.tab_id) throw new Error(`herdr tab create returned no pane: ${raw.slice(0, 200)}`);
+  return { tab_id: String(tab.tab_id), pane_id: String(pane.pane_id), workspace_id: String(pane.workspace_id ?? "") };
+}
+
+/**
+ * Start `kind` in a pane sitting at a shell prompt, and wait until herdr
+ * sees it ready for input. `agentArgs` go to the agent itself (`--yolo`).
+ */
+export async function startAgent(opts: {
+  paneId: string;
+  kind: string;
+  name: string;
+  agentArgs?: string[];
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const args = ["agent", "start", opts.name, "--kind", opts.kind, "--pane", opts.paneId, "--timeout", String(timeoutMs)];
+  if (opts.agentArgs?.length) args.push("--", ...opts.agentArgs);
+  await execHerdrAsync(args, timeoutMs + 10_000);
+}
+
+/** Close a tab the bridge opened and could not put an agent in. */
+export function closeTab(tabId: string): void {
+  execHerdr(["tab", "close", tabId]);
+}

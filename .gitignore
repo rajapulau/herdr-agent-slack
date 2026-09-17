@@ -1,0 +1,11 @@
+dist/
+node_modules/
+.env
+*.log
+.pi-subagents/
+docs/.vitepress/dist
+docs/.vitepress/cache
+
+# Files people send from the chat land here. They are the sender's content,
+# never the repository's.
+.inbox/

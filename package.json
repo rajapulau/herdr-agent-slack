@@ -1,0 +1,21 @@
+{
+  "name": "herdr-slack-plugin",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Bridge herdr agent panes to Slack — one thread per pane, several bots, handoffs between them. Zero LLM in the path.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && vitest run"
+  },
+  "dependencies": {
+    "@slack/bolt": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  }
+}
