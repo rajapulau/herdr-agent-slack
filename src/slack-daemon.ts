@@ -907,6 +907,23 @@ export async function startSlackDaemon(
     hint = "",
   ): Promise<ThreadBinding | undefined> => {
     const key = bindingKey(bot.name, thread);
+    // A channel with a pane of its own in the config: every thread there
+    // shares it, no binding asked for.
+    if (!isDirectMessage(thread.channel) && Object.keys(bot.cfg.channelPanes).length > 0) {
+      const wanted = bot.cfg.channelPanes[thread.channel.toLowerCase()]
+        ?? bot.cfg.channelPanes[await bot.client.channelName(thread.channel)];
+      if (wanted) {
+        const found = lookupPane(wanted, getAgents());
+        if ("reply" in found) {
+          log.warn("the channel's configured pane was not found", { bot: bot.name, channel: thread.channel, pane: wanted });
+          await bot.client.post(thread, `This channel is set to pane *${wanted}*, but herdr does not list it.\n\n${found.reply}`);
+          return undefined;
+        }
+        log.info("binding to the channel's pane", { bot: bot.name, channel: thread.channel, paneId: found.pane.pane_id, thread: threadKey(thread) });
+        await bind(bot, thread, found.pane, userId, { quiet: true });
+        return state.threads[key];
+      }
+    }
     // A channel thread of its own: opened once, however many messages
     // arrive while it starts.
     if (bot.cfg.channelPane === "fresh" && !isDirectMessage(thread.channel)) {

@@ -141,6 +141,39 @@ describe("[slack.<name>] — several bots in one config", () => {
     }
   });
 
+  it("reads a per-channel pane table for each bot", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-channels-"));
+    try {
+      writeFileSync(join(dir, "config.toml"), [
+        "[slack.shaka]",
+        'bot_token = "xoxb-s"',
+        'app_token = "xapp-s"',
+        "",
+        "[slack.shaka.channels]",
+        'C0BJLRE4GP4 = "develop-legal-bot"',
+        '"#legal-bot-test" = "develop-legal-bot"',
+        'Harness = "planner-harness"',
+        "",
+        "[slack.lilith]",
+        'bot_token = "xoxb-l"',
+        'app_token = "xapp-l"',
+      ].join("\n"));
+      const cfg = loadConfig(dir);
+      expect(cfg.slackBots.map((b) => b.name)).toEqual(["shaka", "lilith"]);
+      // Keys are lower-cased and stripped of `#`, so either spelling matches.
+      expect(cfg.slackBots[0].channelPanes).toEqual({
+        c0bjlre4gp4: "develop-legal-bot",
+        "legal-bot-test": "develop-legal-bot",
+        harness: "planner-harness",
+      });
+      expect(cfg.slackBots[1].channelPanes).toEqual({});
+      // The table did not disturb the bot's own fields.
+      expect(cfg.slackBots[1].botToken).toBe("xoxb-l");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("treats a bare [slack] as the one bot named default", () => {
     const dir = mkdtempSync(join(tmpdir(), "cfg-bot-"));
     try {

@@ -65,6 +65,13 @@ export interface SlackBotConfig {
    * Default 20. 0 = no limit.
    */
   maxHandoffs: number;
+  /**
+   * Per channel, the pane a thread there is bound to without asking — the
+   * `[slack.<name>.channels]` table. Keys are channel ids (`C…`) or names
+   * (with or without `#`); values are pane labels or ids. Looked up before
+   * `channelPane` decides between the default pane and a fresh one.
+   */
+  channelPanes: Record<string, string>;
 }
 
 export interface Config {
@@ -180,43 +187,58 @@ export function loadConfig(configDir?: string): Config {
   // the declared type from narrowing to `null` at every use.
   let currentSlackBot = null as SlackBotConfig | null;
   const openSlackBot = (name: string): void => {
-    currentSlackBot = { name, botToken: "", appToken: "", allowedUserIds: [], spawnAgent: "codex", spawnArgs: [], defaultPane: "", channelPane: "shared", spawnCwd: "", idleCloseMinutes: 120, role: "", markWorking: "hourglass_flowing_sand", markDone: "white_check_mark", maxHandoffs: 20 };
+    currentSlackBot = { name, botToken: "", appToken: "", allowedUserIds: [], spawnAgent: "codex", spawnArgs: [], defaultPane: "", channelPane: "shared", spawnCwd: "", idleCloseMinutes: 120, role: "", markWorking: "hourglass_flowing_sand", markDone: "white_check_mark", maxHandoffs: 20, channelPanes: {} };
     fileSlackBots.push(currentSlackBot);
   };
 
   if (fs.existsSync(filePath)) {
     const lines = fs.readFileSync(filePath, "utf8").split("\n");
     let inSlack = false;
+    let inChannels = false;
     let inAgents = false;
     let currentAgent: string | null = null;
     for (const raw of lines) {
       const line = raw.trim();
       if (!line || line.startsWith("#")) continue;
-      if (line === "[slack]") { inSlack = true; inAgents = false; openSlackBot("default"); continue; }
+      if (line === "[slack]") { inSlack = true; inChannels = false; inAgents = false; openSlackBot("default"); continue; }
+      // [slack.channels] or [slack.<name>.channels]: that bot's channel → pane table.
+      if (/^\[slack(?:\.[^.\]]+)?\.channels\]$/.test(line)) {
+        const owner = line.slice(7, -10).replace(/^\./, "").trim().toLowerCase() || "default";
+        const bot = fileSlackBots.find((b) => b.name === owner);
+        if (bot) currentSlackBot = bot; else openSlackBot(owner);
+        inSlack = false; inChannels = true; inAgents = false;
+        continue;
+      }
       // e.g. [slack.lilith] — one of several bots, named for the others to address.
       if (line.startsWith("[slack.") && line.endsWith("]")) {
-        inSlack = true; inAgents = false;
+        inSlack = true; inChannels = false; inAgents = false;
         openSlackBot(line.slice(7, -1).trim().toLowerCase());
         continue;
       }
       if (line.startsWith("[agents.") && line.endsWith("]")) {
         // e.g. [agents.opencode]
-        inSlack = false;
+        inSlack = false; inChannels = false;
         inAgents = true;
         currentAgent = line.slice(8, -1);
         if (!fileAgentPaths[currentAgent]) fileAgentPaths[currentAgent] = {};
         continue;
       }
       if (line === "[agents]") {
-        inSlack = false;
+        inSlack = false; inChannels = false;
         inAgents = true;
         currentAgent = null;
         continue;
       }
       // Any other section is not this plugin's.
-      if (line.startsWith("[")) { inSlack = false; inAgents = false; currentAgent = null; continue; }
+      if (line.startsWith("[")) { inSlack = false; inChannels = false; inAgents = false; currentAgent = null; continue; }
       const kv = parseTomlLine(line);
       if (!kv) continue;
+      if (inChannels && currentSlackBot) {
+        // `#legal-bot-test = "develop-legal-bot"`, or by channel id.
+        const channel = kv[0].trim().replace(/^["']|["']$/g, "").replace(/^#/, "").toLowerCase();
+        if (channel && kv[1].trim()) currentSlackBot.channelPanes[channel] = kv[1].trim();
+        continue;
+      }
       if (inSlack && currentSlackBot) {
         if (kv[0] === "bot_token") currentSlackBot.botToken = kv[1];
         else if (kv[0] === "app_token") currentSlackBot.appToken = kv[1];
@@ -261,7 +283,7 @@ export function loadConfig(configDir?: string): Config {
     fileSlackBots.length === 0 &&
     (process.env.HERDR_SLACK_BOT_TOKEN || process.env.HERDR_SLACK_APP_TOKEN)
   ) {
-    fileSlackBots.push({ name: "default", botToken: "", appToken: "", allowedUserIds: [], spawnAgent: "codex", spawnArgs: [], defaultPane: "", channelPane: "shared", spawnCwd: "", idleCloseMinutes: 120, role: "", markWorking: "hourglass_flowing_sand", markDone: "white_check_mark", maxHandoffs: 20 });
+    openSlackBot("default");
   }
   const first = fileSlackBots[0];
   if (first) {

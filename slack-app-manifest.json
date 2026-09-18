@@ -31,7 +31,9 @@
         "channels:history",
         "groups:history",
         "users:read",
-        "reactions:write"
+        "reactions:write",
+        "channels:read",
+        "groups:read"
       ]
     }
   },

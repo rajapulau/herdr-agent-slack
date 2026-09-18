@@ -341,6 +341,27 @@ export class SlackClient {
     }
   }
 
+  /**
+   * A channel's name, for matching the config's `[slack.<name>.channels]`
+   * keys. Fetched once per channel; "" when Slack will not say (a missing
+   * channels:read / groups:read scope), in which case only ids match.
+   */
+  private readonly channelNames = new Map<string, string>();
+
+  async channelName(channelId: string): Promise<string> {
+    const known = this.channelNames.get(channelId);
+    if (known !== undefined) return known;
+    let name = "";
+    try {
+      const result = await this.app.client.conversations.info({ channel: channelId });
+      name = ((result.channel as { name?: string } | undefined)?.name ?? "").toLowerCase();
+    } catch (err) {
+      this.logger.warn("conversations.info failed; channels are matched by id only", { channelId, message: describe(err) });
+    }
+    this.channelNames.set(channelId, name);
+    return name;
+  }
+
   /** Display names, fetched once each. Falls back to the id when Slack will not say. */
   private readonly names = new Map<string, string>();
 
@@ -425,6 +446,7 @@ export class SlackClient {
       ["files:write", "cannot send files"],
       ["users:read", "thread history will name people by id"],
       ["reactions:write", "no ⏳/✅ on the messages it answers"],
+      ["channels:read", "[slack.<name>.channels] keys must be channel ids, not names"],
     ];
     const missing = needed.filter(([scope]) => !granted.has(scope));
     if (missing.length === 0) return;

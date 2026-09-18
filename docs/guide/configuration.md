@@ -44,6 +44,10 @@ stability_window_ms = 30000   # min ms a scraped pane must stay unchanged before
                               # a turn is declared final
 max_total_wait_s = 1800       # ceiling on one observe loop
 
+[slack.channels]              # per channel, the pane its threads use — see below
+"#legal-bot-test" = "develop-legal-bot"
+C07UN4GG3PE = "planner-harness"
+
 [agents.opencode]             # per-agent data paths, when not at the default
 # db = "/path/to/opencode.db"
 ```
@@ -100,6 +104,25 @@ prompt of every thread, next to the bridge note. The note says what a bot
 *should*. Without it a capable agent does the work itself, which is what
 agents do; with "coding goes to lilith" the planner hands over. Each bot's
 role is also shown to the others, so a planner knows what the coder is for.
+
+### [slack.<name>.channels] — a pane per channel
+
+A channel that is about one project can go straight to that project's pane,
+no `!bind`, whatever `channel_pane` says for the rest:
+
+```toml
+[slack.shaka.channels]
+"#legal-bot-test" = "develop-legal-bot"   # by name (quoted: TOML keys with # need it)
+C07UN4GG3PE = "planner-harness"           # or by id, from the channel's URL
+```
+
+Every thread in that channel shares the pane, the way DM threads share
+`default_pane`; the answer goes to the thread that asked. The lookup happens
+before `channel_pane` decides between the default pane and a fresh one, so a
+channel not in the table behaves as before. Matching by name needs the
+`channels:read` scope (`groups:read` for private channels); without it, ids
+still work and the log says so. A pane the table names that herdr does not
+list is reported in the thread.
 
 ### channel_pane
 
