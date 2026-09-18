@@ -29,6 +29,39 @@ describe("DeferredReader — a log that is not there yet", () => {
   });
 });
 
+describe("DeferredReader — when the log never comes", () => {
+  it("reads the screen after the grace period, and says so as a scrape", () => {
+    let t = 1_000_000;
+    const warnings: string[] = [];
+    const log = { ...logger, warn: (m: string) => { warnings.push(m); } };
+    const scrape = { kind: "scrape", read: () => "from the screen" };
+    const reader = new DeferredReader("claude-jsonl", true, () => null, log, "w1:p1", scrape, 90_000, () => t);
+    expect(reader.read(10)).toBe("");
+    expect(reader.kind).toBe("claude-jsonl");
+    expect(reader.verbatim).toBe(true);
+    t += 60_000;
+    expect(reader.read(10)).toBe(""); // still within the grace
+    t += 60_000;
+    expect(reader.read(10)).toBe("from the screen");
+    expect(reader.kind).toBe("scrape");
+    expect(reader.verbatim).toBe(false);
+    expect(warnings).toHaveLength(1);
+    // Once given up, it stays on the screen even if a log would now appear.
+    expect(reader.read(10)).toBe("from the screen");
+  });
+
+  it("prefers the log when it appears within the grace", () => {
+    let t = 0;
+    let available = false;
+    const scrape = { kind: "scrape", read: () => "screen" };
+    const reader = new DeferredReader("claude-jsonl", true, () => (available ? { kind: "claude-jsonl", verbatim: true, read: () => "log" } : null), logger, "w1:p1", scrape, 90_000, () => t);
+    reader.read(10);
+    t = 30_000; available = true;
+    expect(reader.read(10)).toBe("log");
+    expect(reader.kind).toBe("claude-jsonl");
+  });
+});
+
 describe("Codex pane that has no session yet", () => {
   let home: string;
   let previousHome: string | undefined;

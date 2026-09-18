@@ -680,10 +680,19 @@ function safeGetAgentInfo(deps: AgentCommunicatorDeps): { agent?: string; agent_
  * is allowed for tests that want to inject a custom reader.
  */
 export class AgentCommunicator {
-  /** Short identifier of the active reader ("scrape" | "jsonl" | "opencode-db"). */
-  readonly readerKind: string;
+  /**
+   * Short identifier of the active reader ("scrape" | "claude-jsonl" | …).
+   * Read through to the reader: one chosen before its log existed may settle
+   * for the screen later, and every scrape-or-structured decision here must
+   * follow it when it does.
+   */
+  get readerKind(): string {
+    return this.reader.kind;
+  }
   /** Whether the reader's text is the model's own, needing no pane filters. */
-  readonly verbatim: boolean;
+  get verbatim(): boolean {
+    return this.reader.verbatim === true;
+  }
   /**
    * Pane id this communicator is bound to. Required for `sendInput`.
    * Optional in the constructor purely so existing direct-construction
@@ -697,8 +706,6 @@ export class AgentCommunicator {
     private readonly logger: Logger = fallbackLog,
     paneId?: string,
   ) {
-    this.readerKind = reader.kind;
-    this.verbatim = reader.verbatim === true;
     this.reader = reader;
     this.paneId = paneId ?? "";
   }

@@ -72,7 +72,7 @@ export function createAgentOutputReader(req: AgentReaderRequest): AgentOutputRea
       if (session?.kind !== "id") return null;
       const path = findCodexSessionPath(session.id);
       return path ? new CodexJsonlReader(path, req.logger, req.paneId) : null;
-    }, req.logger, req.paneId);
+    }, req.logger, req.paneId, new ScrapeReader(req.paneId, req.readPane));
   }
 
   // Likewise a Claude pane herdr has not put a session id to yet.
@@ -82,17 +82,28 @@ export function createAgentOutputReader(req: AgentReaderRequest): AgentOutputRea
       const session = resolve();
       if (session?.kind !== "id") return null;
       const sessionId = session.id;
-      return new ClaudeJsonlReader(() => findClaudeSessionPath(sessionId), req.logger, req.paneId);
-    }, req.logger, req.paneId);
+      // The transcript itself may still be missing; the reader looks again on
+      // every read, so hand it over only once the file is there.
+      return findClaudeSessionPath(sessionId)
+        ? new ClaudeJsonlReader(() => findClaudeSessionPath(sessionId), req.logger, req.paneId)
+        : null;
+    }, req.logger, req.paneId, new ScrapeReader(req.paneId, req.readPane));
   }
 
   if (req.session?.kind === "id" && req.agentName === "claude") {
-    // No fallback to scrape when the file is not there yet: a Claude Code
-    // session writes its transcript with its first prompt, and a pane bound
-    // before that has simply not been asked anything. The reader keeps
-    // looking until the file appears.
+    // A Claude Code session writes its transcript with its first prompt, so
+    // a pane bound before that has simply not been asked anything: the
+    // reader keeps looking until the file appears — and reads the screen if
+    // it never does.
     const sessionId = req.session.id;
-    return new ClaudeJsonlReader(() => findClaudeSessionPath(sessionId), req.logger, req.paneId);
+    if (findClaudeSessionPath(sessionId)) {
+      return new ClaudeJsonlReader(() => findClaudeSessionPath(sessionId), req.logger, req.paneId);
+    }
+    return new DeferredReader("claude-jsonl", true, () => (
+      findClaudeSessionPath(sessionId)
+        ? new ClaudeJsonlReader(() => findClaudeSessionPath(sessionId), req.logger, req.paneId)
+        : null
+    ), req.logger, req.paneId, new ScrapeReader(req.paneId, req.readPane));
   }
 
   if (req.session?.kind === "id" && req.agentName === "opencode") {

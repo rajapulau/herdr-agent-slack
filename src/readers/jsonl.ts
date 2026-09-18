@@ -300,23 +300,58 @@ export class ClaudeJsonlReader implements AgentOutputReader {
  * has not said anything. Chosen instead of the screen, because the screen
  * of a pane that has said nothing is its welcome banner, and that has been
  * delivered as an answer.
+ *
+ * But not forever. A log that has not appeared `graceMs` after the first
+ * read is not coming — the daemon runs as another user than the agent, the
+ * agent keeps its files somewhere else — and a pane that answers into a
+ * void is worse than a pane read off its screen. After the grace the
+ * `fallback` takes over, for good, and the log says so. `kind` and
+ * `verbatim` follow whichever reader is answering, so the communicator's
+ * scrape-or-structured decisions follow too.
  */
 export class DeferredReader implements AgentOutputReader {
   private inner: AgentOutputReader | null = null;
+  private firstReadAt: number | null = null;
+  private gaveUp = false;
   constructor(
-    readonly kind: string,
-    readonly verbatim: boolean,
+    private readonly expectedKind: string,
+    private readonly expectedVerbatim: boolean,
     private readonly pick: () => AgentOutputReader | null,
     private readonly logger: Logger,
     private readonly paneId: string,
+    private readonly fallback: AgentOutputReader | null = null,
+    private readonly graceMs = 90_000,
+    private readonly now: () => number = Date.now,
   ) {}
 
+  get kind(): string {
+    return this.inner?.kind ?? this.expectedKind;
+  }
+
+  get verbatim(): boolean {
+    return this.inner ? this.inner.verbatim === true : this.expectedVerbatim;
+  }
+
   private resolved(): AgentOutputReader | null {
-    if (!this.inner) {
-      this.inner = this.pick();
-      if (this.inner) this.logger.info("structured source found", { paneId: this.paneId, kind: this.inner.kind });
+    if (this.inner) return this.inner;
+    this.firstReadAt ??= this.now();
+    const found = this.pick();
+    if (found) {
+      this.inner = found;
+      this.logger.info("structured source found", { paneId: this.paneId, kind: found.kind });
+      return found;
     }
-    return this.inner;
+    if (this.fallback && !this.gaveUp && this.now() - this.firstReadAt > this.graceMs) {
+      this.gaveUp = true;
+      this.inner = this.fallback;
+      this.logger.warn("structured source never appeared; reading the screen instead", {
+        paneId: this.paneId,
+        expected: this.expectedKind,
+        afterMs: this.now() - this.firstReadAt,
+      });
+      return this.fallback;
+    }
+    return null;
   }
 
   read(maxLines: number): string {
