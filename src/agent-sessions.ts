@@ -204,6 +204,56 @@ export function findClaudeSessionPath(sessionId: string): string | null {
   return null;
 }
 
+/**
+ * Find a Claude Code session by what was typed into it, when herdr cannot
+ * say which session a pane runs — its Claude integration is not installed
+ * on that machine. The bridge knows the exact text it sent, and that text
+ * is unique to one session: it carries the bridge note and the thread's
+ * question. A transcript under the pane's project directory that logs it
+ * as a user prompt is the pane's; every other file is left alone.
+ *
+ * Bounded to files touched in the last day, in the directory Claude Code
+ * names after `cwd` (`/home/x/app` → `-home-x-app`), falling back to every
+ * project directory when that one is not there.
+ */
+export function findClaudeSessionByPrompt(cwd: string | undefined, prompts: Iterable<string>): string | null {
+  const wanted = [...prompts].map((text) => text.trim()).filter((text) => text.length >= 20);
+  if (wanted.length === 0) return null;
+  const root = join(homedir(), ".claude", "projects");
+  const encoded = cwd ? cwd.replace(/[^A-Za-z0-9]/g, "-") : "";
+  let dirs: string[];
+  try {
+    const all = readdirSync(root, { encoding: "utf8" });
+    dirs = encoded && all.includes(encoded) ? [encoded] : all;
+  } catch {
+    return null;
+  }
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  for (const dir of dirs) {
+    let files: string[];
+    try {
+      files = readdirSync(join(root, dir), { encoding: "utf8" }).filter((name) => name.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    for (const name of files) {
+      const path = join(root, dir, name);
+      try {
+        if (statSync(path).mtimeMs < since) continue;
+        const raw = readFileSync(path, "utf8");
+        // The prompt is logged JSON-encoded; compare against the encoded form
+        // so line breaks and quotes match as written.
+        if (wanted.some((text) => raw.includes(JSON.stringify(text).slice(1, -1)))) {
+          return name.slice(0, -".jsonl".length);
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
 // --- AgentOutputReader interface --------------------------------------------
 
 /**
@@ -604,7 +654,7 @@ export class OpenCodeDbReader implements AgentOutputReader {
 /** Subset of herdr-client AgentInfo that factory needs. */
 export interface AgentCommunicatorDeps {
   paneId: string;
-  getAgentInfo: (target: string) => { agent?: string; agent_status?: string; agent_session?: AgentSessionRef } | null;
+  getAgentInfo: (target: string) => { agent?: string; agent_status?: string; agent_session?: AgentSessionRef; cwd?: string } | null;
   readPane: (paneId: string, lines: number) => string;
   agentPaths?: Record<string, Record<string, string>>;
   logger?: Logger;
@@ -643,18 +693,28 @@ export function createAgentCommunicator(depsIn: AgentCommunicatorDeps): AgentCom
   const log: Logger = deps.logger ?? fallbackLog;
 
   const info = safeGetAgentInfo(deps);
+  // Assigned below; the resolver closes over it so a Claude pane herdr
+  // cannot name a session for can still be found by what the bridge sent.
+  let communicator: AgentCommunicator | undefined;
   const reader = createAgentOutputReader({
     paneId: deps.paneId,
     agentName: info?.agent ?? "?",
     session: info?.agent_session,
-    resolveSession: () => safeGetAgentInfo(deps)?.agent_session,
+    resolveSession: () => {
+      const live = safeGetAgentInfo(deps);
+      if (live?.agent_session) return live.agent_session;
+      if (live?.agent !== "claude" || !communicator) return undefined;
+      const guessed = findClaudeSessionByPrompt(live.cwd, communicator.sentPrompts());
+      if (guessed) log.info("session found by the prompt the bridge sent", { paneId: deps.paneId, sessionId: guessed });
+      return guessed ? { kind: "id", id: guessed } : undefined;
+    },
     readPane: deps.readPane,
     agentPaths: deps.agentPaths,
     opencodeReadOptions: deps.opencodeReadOptions,
     sqliteDriver: deps.sqliteDriver,
     logger: log,
   });
-  const communicator = new AgentCommunicator(reader, log, deps.paneId);
+  communicator = new AgentCommunicator(reader, log, deps.paneId);
   // A pane that is not working has answered its log's last question already.
   // So has a working one whose log shows an answer under that question: it
   // woke to continue — a monitor, a background shell — and the question is
@@ -663,7 +723,7 @@ export function createAgentCommunicator(depsIn: AgentCommunicatorDeps): AgentCom
   return communicator;
 }
 
-function safeGetAgentInfo(deps: AgentCommunicatorDeps): { agent?: string; agent_status?: string; agent_session?: AgentSessionRef } | null {
+function safeGetAgentInfo(deps: AgentCommunicatorDeps): { agent?: string; agent_status?: string; agent_session?: AgentSessionRef; cwd?: string } | null {
   try {
     return deps.getAgentInfo(deps.paneId);
   } catch {
@@ -774,6 +834,12 @@ export class AgentCommunicator {
     return this.knownPrompts.has(prompt.trim());
   }
 
+  /** What the bridge has typed into this pane, newest last. */
+  sentPrompts(): string[] {
+    return [...this.sentTexts];
+  }
+  private readonly sentTexts: string[] = [];
+
   /**
    * Read the current output from the agent.
    *
@@ -872,6 +938,8 @@ export class AgentCommunicator {
     this.lastInput = text;
     this.externalTurn = false;
     this.remember(text);
+    this.sentTexts.push(text);
+    if (this.sentTexts.length > 8) this.sentTexts.shift();
     sendText(this.paneId, text);
   }
 

@@ -171,3 +171,37 @@ describe("Claude reader selection", () => {
     expect(reader.read(100)).toBe("now it is");
   });
 });
+
+import { findClaudeSessionByPrompt } from "../../src/agent-sessions.js";
+
+describe("findClaudeSessionByPrompt — a session herdr could not name", () => {
+  let home: string;
+  let previousHome: string | undefined;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "claude-guess-"));
+    previousHome = process.env.HOME;
+    process.env.HOME = home;
+  });
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("finds the transcript that logs what the bridge sent, in the cwd's project directory", () => {
+    const project = join(home, ".claude", "projects", "-home-ganjar-widi");
+    mkdirSync(project, { recursive: true });
+    const sent = "[Slack bridge: you are york, answering in a Slack thread.]\n\ntes dari bridge: jawab singkat";
+    writeFileSync(join(project, "aaaa.jsonl"), user("sesuatu yang lain") + "\n" + assistant([text("x")]) + "\n");
+    writeFileSync(join(project, "bbbb.jsonl"), user(sent) + "\n" + assistant([text("Jawaban.")]) + "\n");
+    expect(findClaudeSessionByPrompt("/home/ganjar_widi", [sent])).toBe("bbbb");
+  });
+
+  it("returns nothing for a prompt nobody logged, or one too short to be unique", () => {
+    const project = join(home, ".claude", "projects", "-home-x");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, "cccc.jsonl"), user("halo") + "\n");
+    expect(findClaudeSessionByPrompt("/home/x", ["halo"])).toBeNull();
+    expect(findClaudeSessionByPrompt("/home/x", ["a question that was never typed anywhere at all"])).toBeNull();
+  });
+});
